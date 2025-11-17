@@ -19,12 +19,62 @@
 
 - `requirements.txt` - 更新依赖版本要求
 - `constraints.txt` - 固定依赖版本到最新稳定版
+- `app/callbacks/usage.py` - 优化为使用 LangChain 1.0 推荐的 `usage_metadata`
+- `app/llm/factory.py` - 添加 `stream_usage=True` 参数
+
+## 代码改进
+
+### 符合 LangChain 1.0 最佳实践的改进
+
+虽然原代码可以运行，但为了完全符合 LangChain 1.0 的最佳实践，进行了以下改进：
+
+#### 1. **app/callbacks/usage.py** - Token Usage 获取方式优化
+
+**改进内容：**
+- ✅ 优先使用 `usage_metadata`（LangChain 1.0+ 推荐的标准化接口）
+- ✅ 保留 `llm_output` 作为向后兼容的 fallback
+- ✅ 三层 fallback 机制确保在所有场景下都能获取 token 统计
+
+**代码变更：**
+```python
+# 方法 1: 优先使用 usage_metadata (LangChain 1.0+ 推荐)
+msg.usage_metadata.get("input_tokens", 0)
+msg.usage_metadata.get("output_tokens", 0)
+
+# 方法 2: Fallback 到 llm_output (向后兼容)
+response.llm_output.get("token_usage")
+
+# 方法 3: tiktoken 近似计算 (最终 fallback)
+```
+
+**优势：**
+- 使用标准化接口，跨模型提供商一致
+- 未来版本兼容性更好
+- 保持向后兼容，不影响现有功能
+
+#### 2. **app/llm/factory.py** - 添加 `stream_usage=True`
+
+**改进内容：**
+- ✅ 添加 `stream_usage=True` 参数
+- ✅ 确保流式场景下也能获取 usage metadata
+- ✅ 与 LCEL 链和 `.with_structured_output()` 更好配合
+
+**代码变更：**
+```python
+ChatOpenAI(
+    # ... 其他参数 ...
+    stream_usage=True,  # LangChain 1.0+: ensure usage metadata in streaming
+)
+```
+
+**优势：**
+- 支持流式输出场景的 token 统计
+- LangChain 1.0 官方推荐配置
+- 与现代 LangChain 功能更好集成
 
 ## 兼容性说明
 
-### 代码无需修改
-
-经过全面检查，项目代码**无需任何修改**即可兼容 LangChain 1.0。原因如下：
+### 核心 API 保持稳定
 
 1. **核心 API 保持稳定**
    - `ChatOpenAI` - 完全兼容

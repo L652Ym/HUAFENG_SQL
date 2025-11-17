@@ -25,20 +25,44 @@ class TokenUsageHandler(BaseCallbackHandler):
                 self.llm_runtime_sec += (time.perf_counter() - start_ts)
         except Exception:
             pass
-        # accumulate tokens
+
+        # accumulate tokens - LangChain 1.0+ best practice: use usage_metadata
+        usage_found = False
+
+        # Method 1: Try usage_metadata from message (LangChain 1.0+ recommended)
         try:
-            usage = response.llm_output.get("token_usage")
+            for gen_list in getattr(response, "generations", []):
+                for gen in gen_list:
+                    msg = getattr(gen, "message", None)
+                    if msg and hasattr(msg, "usage_metadata") and msg.usage_metadata:
+                        metadata = msg.usage_metadata
+                        self.prompt_tokens += metadata.get("input_tokens", 0)
+                        self.completion_tokens += metadata.get("output_tokens", 0)
+                        self.total_tokens += metadata.get("total_tokens", 0)
+                        usage_found = True
+                        break
+                if usage_found:
+                    break
         except Exception:
-            usage = None
-        if usage:
-            self.prompt_tokens += usage.get("prompt_tokens", 0)
-            self.completion_tokens += usage.get("completion_tokens", 0)
-            self.total_tokens += usage.get(
-                "total_tokens",
-                usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0),
-            )
-        else:
-            # Fallback: approximate tokens from output text
+            pass
+
+        # Method 2: Fallback to llm_output for backward compatibility
+        if not usage_found:
+            try:
+                usage = response.llm_output.get("token_usage")
+                if usage:
+                    self.prompt_tokens += usage.get("prompt_tokens", 0)
+                    self.completion_tokens += usage.get("completion_tokens", 0)
+                    self.total_tokens += usage.get(
+                        "total_tokens",
+                        usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0),
+                    )
+                    usage_found = True
+            except Exception:
+                pass
+
+        # Method 3: Final fallback - approximate tokens from output text
+        if not usage_found:
             approx_tokens = 0
             try:
                 import tiktoken

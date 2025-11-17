@@ -40,4 +40,5 @@ def build_llm(base_url: str) -> ChatOpenAI:
         max_tokens=LLM_MAX_TOKENS,
         model_kwargs=model_kwargs,
         default_headers=headers,
+        stream_usage=True,  # LangChain 1.0+: ensure usage metadata in streaming
     )
