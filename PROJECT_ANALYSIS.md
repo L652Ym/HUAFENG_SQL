@@ -672,7 +672,273 @@ SQL_YEAR_COLUMN_NAME = "ts"
 # Phoenix 可观测性
 PHOENIX_ENABLED = False
 PHOENIX_ENDPOINT = "http://127.0.0.1:6006/v1/traces"
+PHOENIX_PROJECT_NAME = "HUAFENG-SQL"
 ```
+
+---
+
+## Phoenix 可观测性系统
+
+### 架构概述
+
+Phoenix 是一个开源的 LLM 可观测性平台，本项目通过 **OpenTelemetry** 集成实现完整的链路追踪和评估。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Phoenix 可观测性层                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌──────────────────┐         ┌──────────────────┐         │
+│  │  Tracing Layer   │         │  Evaluation      │         │
+│  │  (自动链路追踪)   │         │  (质量评估)       │         │
+│  └──────────────────┘         └──────────────────┘         │
+│          │                             │                    │
+│          ▼                             ▼                    │
+│  ┌──────────────────────────────────────────────┐          │
+│  │       OpenTelemetry Integration             │          │
+│  │  - TracerProvider                           │          │
+│  │  - BatchSpanProcessor                       │          │
+│  │  - OTLPSpanExporter                         │          │
+│  │  - LangChainInstrumentor (自动插桩)          │          │
+│  └──────────────────────────────────────────────┘          │
+│          │                                                  │
+└──────────┼──────────────────────────────────────────────────┘
+           │
+           ▼
+  ┌────────────────────────────────┐
+  │   LangChain 应用层              │
+  │   - RoutingOrchestrator        │
+  │   - SQL Agent                  │
+  │   - CSV Agent                  │
+  │   - LLM calls                  │
+  └────────────────────────────────┘
+```
+
+### 核心功能
+
+#### 1. **自动链路追踪** (Automatic Tracing)
+
+**实现位置**: `app/observability/phoenix.py:init()`
+
+```python
+def init(endpoint: str) -> None:
+    # 1. 创建 Resource（项目标识）
+    resource = Resource.create({
+        SEMRESATTRS_PROJECT_NAME: PHOENIX_PROJECT_NAME  # "HUAFENG-SQL"
+    })
+
+    # 2. 设置 TracerProvider
+    tp = TracerProvider(resource=resource)
+    trace_api.set_tracer_provider(tp)
+
+    # 3. 添加批量 Span 导出器
+    tp.add_span_processor(
+        BatchSpanProcessor(
+            OTLPSpanExporter(endpoint)  # http://127.0.0.1:6006/v1/traces
+        )
+    )
+
+    # 4. 🔥 自动插桩 LangChain（核心功能）
+    LangChainInstrumentor().instrument()
+```
+
+**自动捕获的调用**:
+- ✅ 所有 LLM 调用 (ChatOpenAI.invoke)
+- ✅ Agent 执行 (AgentExecutor.invoke)
+- ✅ Tool 调用 (StructuredTool.invoke)
+- ✅ Chain 执行 (RunnableSequence.invoke)
+- ✅ Prompt 渲染
+- ✅ Token 使用量
+
+**调用时机**: `scripts/service.py:main()` 启动时
+```python
+if PHOENIX_ENABLED:
+    from app.observability.phoenix import init
+    init(PHOENIX_ENDPOINT)  # 初始化后，后续所有 LangChain 调用都会被追踪
+```
+
+#### 2. **智能质量评估** (LLM-based Evaluation)
+
+**实现位置**: `app/observability/phoenix.py:evaluate()`
+
+每次查询完成后，使用 **LLM 作为评判器** 对回答质量进行评估。
+
+```python
+def evaluate(base_url: str, question: str, final_text: str, lang: str) -> Dict[str, Any]:
+    llm = build_llm(base_url)
+
+    # 评估提示词
+    prompt = (
+        "请对回答进行评估，输出JSON，字段：relevance(1-5), completeness(1-5), clarity(1-5), rationale。"
+        "问题：" + question + "\n回答：" + final_text + "\nJSON："
+    )
+
+    # LLM 评估
+    output = llm.invoke(prompt)
+    text = getattr(output, "content", str(output))
+
+    # 解析 JSON 结果
+    return json.loads(text)
+    # 返回: {
+    #   "relevance": 5,      # 相关性 (1-5分)
+    #   "completeness": 4,   # 完整性 (1-5分)
+    #   "clarity": 5,        # 清晰度 (1-5分)
+    #   "rationale": "..."   # 评估理由
+    # }
+```
+
+**评估维度**:
+- **relevance** (相关性): 回答是否切题
+- **completeness** (完整性): 是否完整回答问题
+- **clarity** (清晰度): 表述是否清晰易懂
+- **rationale** (理由): 评估的详细解释
+
+#### 3. **评估结果记录** (Evaluation Recording)
+
+**实现位置**: `app/observability/phoenix.py:record_eval()`
+
+将评估结果以 OpenTelemetry Span 形式上报到 Phoenix。
+
+```python
+def record_eval(evals: Dict[str, Any], rep: Dict[str, Any]) -> None:
+    tracer = trace_api.get_tracer("huafeng-qa")
+
+    # 创建评估 Span
+    with tracer.start_as_current_span("post_query_eval") as span:
+        # 记录评估分数
+        span.set_attribute("evals.relevance", evals.get("relevance"))
+        span.set_attribute("evals.completeness", evals.get("completeness"))
+        span.set_attribute("evals.clarity", evals.get("clarity"))
+        span.set_attribute("evals.rationale", str(evals.get("rationale")))
+
+        # 记录性能指标
+        for k, v in (rep.get("metrics") or {}).items():
+            span.set_attribute("metrics." + k, v)
+
+        # 记录查询内容
+        span.set_attribute("question", rep.get("question"))
+        span.set_attribute("final_text", rep.get("final_text"))
+```
+
+**上报数据**:
+- 质量评分 (relevance, completeness, clarity)
+- 性能指标 (prompt_tokens, completion_tokens, total_tokens, cost)
+- 查询上下文 (question, final_text, sources)
+
+### 完整工作流程
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ 1. 系统启动 (service.py:main)                              │
+│    ├─ if PHOENIX_ENABLED:                                  │
+│    │    phoenix.init(PHOENIX_ENDPOINT)                     │
+│    │    └─ LangChainInstrumentor().instrument() ✅         │
+│    └─ 所有 LangChain 调用现在都会自动生成 Traces           │
+└────────────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌────────────────────────────────────────────────────────────┐
+│ 2. 用户查询 (交互式或批处理模式)                            │
+│    ├─ router.execute(question)                             │
+│    │   ├─ [自动追踪] Plan sources (LLM call)               │
+│    │   ├─ [自动追踪] Probe sources                         │
+│    │   ├─ [自动追踪] Execute CSV Agent                     │
+│    │   │   └─ [自动追踪] Tool calls: csv_find_rows         │
+│    │   ├─ [自动追踪] Execute SQL Agent                     │
+│    │   │   └─ [自动追踪] Tool calls: sql_db_query          │
+│    │   └─ [自动追踪] Summarize outputs (LLM call)          │
+│    └─ 返回 final_text                                      │
+└────────────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌────────────────────────────────────────────────────────────┐
+│ 3. 评估与记录                                              │
+│    ├─ phoenix.evaluate(question, final_text)               │
+│    │   ├─ [自动追踪] 使用 LLM 进行质量评估                  │
+│    │   └─ 返回: {relevance:5, completeness:4, clarity:5}   │
+│    │                                                        │
+│    ├─ phoenix.record_eval(evals, metrics)                  │
+│    │   └─ 创建 "post_query_eval" Span                      │
+│    │       ├─ 属性: evals.relevance = 5                    │
+│    │       ├─ 属性: evals.completeness = 4                 │
+│    │       ├─ 属性: metrics.total_tokens = 1500            │
+│    │       └─ 属性: question, final_text                   │
+│    │                                                        │
+│    └─ 所有 Spans 通过 OTLP 导出到 Phoenix                  │
+└────────────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌────────────────────────────────────────────────────────────┐
+│ 4. Phoenix UI 可视化 (http://127.0.0.1:6006)              │
+│    ├─ Trace 视图: 完整调用链路可视化                       │
+│    │   ├─ router.execute                                   │
+│    │   │   ├─ plan_sources (LLM)                           │
+│    │   │   ├─ csv_agent.invoke                             │
+│    │   │   │   └─ csv_find_rows                            │
+│    │   │   ├─ sql_agent.invoke                             │
+│    │   │   │   └─ sql_db_query                             │
+│    │   │   └─ summarize (LLM)                              │
+│    │   └─ post_query_eval (LLM)                            │
+│    │                                                        │
+│    ├─ Evaluation 视图: 质量评分趋势分析                     │
+│    │   ├─ Relevance: 平均 4.5/5                            │
+│    │   ├─ Completeness: 平均 4.2/5                         │
+│    │   └─ Clarity: 平均 4.8/5                              │
+│    │                                                        │
+│    └─ Metrics 视图: Token 使用和成本分析                    │
+│        ├─ 总 Tokens: 150K                                  │
+│        ├─ 平均延迟: 2.3s                                   │
+│        └─ 总成本: $0.45                                    │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 关键技术细节
+
+**OpenTelemetry 组件**:
+- `TracerProvider`: 管理 Tracer 的生命周期
+- `BatchSpanProcessor`: 批量处理 Span，减少网络开销
+- `OTLPSpanExporter`: 使用 OTLP (OpenTelemetry Protocol) HTTP 导出
+- `Resource`: 携带项目元数据 (project.name)
+
+**LangChain 插桩**:
+- `LangChainInstrumentor().instrument()`: 自动 monkey-patch LangChain 核心类
+- 无需修改业务代码，即可捕获所有调用
+- 支持 LangChain 1.0+ 的所有 Runnable 接口
+
+**OpenInference 语义约定**:
+- 使用 OpenInference 标准的 span attributes
+- `openinference.project.name`: 项目标识
+- 兼容 Phoenix、Arize 等可观测性平台
+
+### 配置与使用
+
+**环境变量** (`.env`):
+```bash
+PHOENIX_ENABLED=true
+PHOENIX_ENDPOINT=http://127.0.0.1:6006/v1/traces
+PHOENIX_PROJECT_NAME=HUAFENG-SQL
+```
+
+**启动 Phoenix 服务器**:
+```bash
+# 使用 Docker
+docker run -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
+
+# 或使用 Python
+pip install arize-phoenix
+python -m phoenix.server.main serve
+```
+
+**访问 Phoenix UI**:
+```
+http://127.0.0.1:6006
+```
+
+### 数据隐私与安全
+
+- ✅ Phoenix 可本地部署 (127.0.0.1)，数据不出本地网络
+- ✅ 支持禁用 (PHOENIX_ENABLED=false)
+- ✅ 可过滤敏感字段 (通过自定义 span processor)
 
 ---
 
