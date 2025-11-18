@@ -1,0 +1,34 @@
+# Arize Phoenix RAG 演示项目依赖包
+
+# Phoenix 核心包 - AI可观测性和评估平台
+arize-phoenix>=5.0.0
+arize-phoenix-otel>=0.5.0
+
+# OpenAI SDK - 用于DeepSeek API (兼容OpenAI接口)
+openai>=1.50.0
+
+# LlamaIndex - RAG框架
+llama-index>=0.12.0
+llama-index-core>=0.12.0
+llama-index-embeddings-openai>=0.3.0
+llama-index-llms-openai>=0.3.0
+
+# OpenTelemetry - 追踪和监控
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp>=1.27.0
+openinference-instrumentation-llama-index>=3.0.0
+
+# 向量数据库
+chromadb>=0.4.0
+
+# 数据处理
+pandas>=2.1.0
+numpy>=1.24.0
+
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 其他工具
+tqdm>=4.66.0
+colorama>=0.4.6
