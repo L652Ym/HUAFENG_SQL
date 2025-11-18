@@ -21,7 +21,6 @@ from llama_index.core import (
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core.response.schema import Response
 
 # LLM 和 Embedding 模型
 from llama_index.llms.openai import OpenAI
@@ -242,7 +241,7 @@ class PhoenixRAGSystem:
         print("🔍 检索相关文档中...")
 
         # 执行查询 (自动被Phoenix追踪)
-        response: Response = self.query_engine.query(question)
+        response = self.query_engine.query(question)
 
         # 提取检索到的文档
         source_nodes = response.source_nodes if hasattr(response, 'source_nodes') else []
